@@ -29,13 +29,12 @@ def home():
 def oauth2callback():
     state = session.get("state")
     if state != request.args.get("state"):
-        return "State 参数不匹配，可能遭受 CSRF 攻击", 400
+        return "State 参数不匹配，可能遭受 CSRF 攻击。", 400
 
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
-        state=state
+        redirect_uri=REDIRECT_URI
     )
     try:
         flow.fetch_token(authorization_response=request.url)
@@ -74,7 +73,7 @@ async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session["state"] = state
     keyboard = [[InlineKeyboardButton("点击此处授权", url=authorization_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("请点击以下按钮完成授权：", reply_markup=reply_markup)
+    await update.message.reply_text("请点击以下按钮完成授权: ", reply_markup=reply_markup)
 
 def run_all():
     from telegram.ext import Application
@@ -82,7 +81,6 @@ def run_all():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("auth", auth))
 
-    # ✅ 使用 webhook 适配 Railway（⚠️ 请确认 URL）
     application.run_webhook(
         listen="0.0.0.0",
         port=8080,
