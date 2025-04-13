@@ -1,0 +1,4 @@
+flask
+flask-session
+google-auth-oauthlib
+python-telegram-bot==20.6
