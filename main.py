@@ -5,11 +5,7 @@ from flask import Flask, redirect, request, session
 from flask_session import Session
 from google_auth_oauthlib.flow import Flow
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 
@@ -33,31 +29,28 @@ def home():
 def oauth2callback():
     state = session.get("state")
     if state != request.args.get("state"):
-        return "State 参数不匹配，可能遭受 CSRF 攻击。", 400
+        return "State 参数不匹配，可能遭受 CSRF 攻击。400"
 
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
+        redirect_uri=REDIRECT_URI
     )
+    flow.fetch_token(authorization_response=request.url)
 
-    try:
-        flow.fetch_token(authorization_response=request.url)
-        credentials = flow.credentials
-        user_id = session.get("telegram_user_id")
-        if user_id:
-            bot_user_tokens[user_id] = {
-                "token": credentials.token,
-                "refresh_token": credentials.refresh_token,
-                "client_id": credentials.client_id,
-                "client_secret": credentials.client_secret,
-                "scopes": credentials.scopes
-            }
-            return "授权成功! 您现在可以关闭此页面。"
-        else:
-            return "找不到 Telegram 用户 ID，无法绑定。"
-    except Exception as e:
-        return f"授权失败: {e}"
+    credentials = flow.credentials
+    user_id = session.get("telegram_user_id")
+    if user_id:
+        bot_user_tokens[user_id] = {
+            "token": credentials.token,
+            "refresh_token": credentials.refresh_token,
+            "client_id": credentials.client_id,
+            "client_secret": credentials.client_secret,
+            "scopes": credentials.scopes
+        }
+        return "授权成功！您现在可以关闭此页面。"
+    else:
+        return "找不到 Telegram 用户 ID，无法绑定。"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("欢迎使用 AI妃 OAuth 系统，发送 /auth 开始授权。")
@@ -69,28 +62,27 @@ async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI,
+        redirect_uri=REDIRECT_URI
     )
-
     authorization_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent"
     )
-
     session["state"] = state
+
     keyboard = [[InlineKeyboardButton("点击此处授权", url=authorization_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text("请点击以下按钮完成授权：", reply_markup=reply_markup)
 
 def run_all():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    from telegram.ext import Application
 
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("auth", auth))
 
-    # ✅ 使用 webhook 而不是 polling
+    # 启动 webhook 模式（适用于 Railway）
     application.run_webhook(
         listen="0.0.0.0",
         port=8080,
