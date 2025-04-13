@@ -77,15 +77,17 @@ async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("请点击以下按钮完成授权：", reply_markup=reply_markup)
 
 def run_all():
-    import threading
     from telegram.ext import Application
-
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("auth", auth))
 
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
-    application.run_polling()
+    # ✅ 使用 webhook 适配 Railway（⚠️ 请确认 URL）
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=8080,
+        webhook_url="https://feifei-memory-auth-production.up.railway.app"
+    )
 
 if __name__ == "__main__":
     run_all()
