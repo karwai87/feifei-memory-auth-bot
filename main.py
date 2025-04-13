@@ -5,7 +5,11 @@ from flask import Flask, redirect, request, session
 from flask_session import Session
 from google_auth_oauthlib.flow import Flow
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -34,8 +38,9 @@ def oauth2callback():
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
+        redirect_uri=REDIRECT_URI,
     )
+
     try:
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
@@ -48,7 +53,7 @@ def oauth2callback():
                 "client_secret": credentials.client_secret,
                 "scopes": credentials.scopes
             }
-            return "授权成功！您现在可以关闭此页面。"
+            return "授权成功! 您现在可以关闭此页面。"
         else:
             return "找不到 Telegram 用户 ID，无法绑定。"
     except Exception as e:
@@ -60,27 +65,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session["telegram_user_id"] = user_id
+
     flow = Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE,
         scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
+        redirect_uri=REDIRECT_URI,
     )
+
     authorization_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent"
     )
+
     session["state"] = state
     keyboard = [[InlineKeyboardButton("点击此处授权", url=authorization_url)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("请点击以下按钮完成授权: ", reply_markup=reply_markup)
+
+    await update.message.reply_text("请点击以下按钮完成授权：", reply_markup=reply_markup)
 
 def run_all():
-    from telegram.ext import Application
     application = ApplicationBuilder().token(BOT_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("auth", auth))
 
+    # ✅ 使用 webhook 而不是 polling
     application.run_webhook(
         listen="0.0.0.0",
         port=8080,
