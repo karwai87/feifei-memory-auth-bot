@@ -1,33 +1,37 @@
 import os
 import logging
-import base64
-from flask import Flask, redirect, request
+from flask import Flask, redirect, request, session
+from flask_session import Session
 from google_auth_oauthlib.flow import Flow
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Application
 from dotenv import load_dotenv
+from threading import Thread
 
-# 载入 .env 环境变量
+# 加载环境变量
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-# 初始化 Flask
+# Flask 初始化
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET", "defaultsecret")
+app.config["SESSION_TYPE"] = "filesystem"
+Session(app)
 
-# 设置常量
+# 常量设置
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-REDIRECT_URI = "https://feifei-memory-auth-bot-production.up.railway.app/oauth2callback"
-
+REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URL")  # 直接从 env 读取
 bot_user_tokens = {}
 
-# Flask 授权回调接口
+# Flask 路由 - 授权回调
 @app.route("/oauth2callback")
 def oauth2callback():
     try:
         state = request.args.get("state")
-        user_id = int(base64.urlsafe_b64decode(state.encode()).decode())
+        if state != session.get("state"):
+            return "❌ 状态不一致，可能是 CSRF 攻击"
 
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
@@ -37,39 +41,44 @@ def oauth2callback():
         flow.fetch_token(authorization_response=request.url)
 
         credentials = flow.credentials
-        bot_user_tokens[user_id] = {
-            "token": credentials.token,
-            "refresh_token": credentials.refresh_token,
-            "client_id": credentials.client_id,
-            "client_secret": credentials.client_secret,
-            "scopes": credentials.scopes,
-        }
-        return "✅ 授权成功！你现在可以关闭此页面。"
+        user_id = session.get("telegram_user_id")
+
+        if user_id:
+            bot_user_tokens[user_id] = {
+                "token": credentials.token,
+                "refresh_token": credentials.refresh_token,
+                "client_id": credentials.client_id,
+                "client_secret": credentials.client_secret,
+                "scopes": credentials.scopes,
+            }
+            return "✅ 授权成功！你可以关闭这个页面了"
+        return "❌ 无法识别用户 ID，授权失败"
     except Exception as e:
         return f"❌ 授权失败：{e}"
 
-# Telegram bot start 指令
+# Telegram /start 指令
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("欢迎使用 AI妃 OAuth 系统，发送 /auth 开始授权流程。")
 
-# Telegram bot auth 指令
+# Telegram /auth 指令
 async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = update.effective_user.id
-        encoded_state = base64.urlsafe_b64encode(str(user_id).encode()).decode()
+        session["telegram_user_id"] = user_id
 
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI,
         )
-        authorization_url, _ = flow.authorization_url(
+
+        authorization_url, state = flow.authorization_url(
             access_type="offline",
             include_granted_scopes="true",
-            prompt="consent",
-            state=encoded_state
+            prompt="consent"
         )
 
+        session["state"] = state
         keyboard = [[InlineKeyboardButton("点击此处授权", url=authorization_url)]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -77,21 +86,19 @@ async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ 授权流程异常：{e}")
 
-# 启动 Bot + Webhook
-def run_all():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("auth", auth))
-
-    application.run_webhook(
+# Telegram Bot 启动逻辑（独立线程）
+def start_telegram_bot():
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("auth", auth))
+    app_bot.run_webhook(
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 8080)),
         url_path="/webhook",
-        webhook_url="https://feifei-memory-auth-bot-production.up.railway.app/webhook"
+        webhook_url=f"{REDIRECT_URI}".replace("/oauth2callback", "/webhook")
     )
 
+# 启动 Flask + Telegram Bot
 if __name__ == "__main__":
-    # 启动 Flask + Telegram
-    import threading
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=5000)).start()
-    run_all()
+    Thread(target=start_telegram_bot).start()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
