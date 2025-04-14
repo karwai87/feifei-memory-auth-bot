@@ -1,45 +1,76 @@
 import os
+import json
 import logging
-from flask import Flask, redirect, request, session
+from threading import Thread
+from flask import Flask, request, session
 from flask_session import Session
 from google_auth_oauthlib.flow import Flow
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Application
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes
+)
+from datetime import datetime
+import pytz
 from dotenv import load_dotenv
-from threading import Thread
 
-# 加载环境变量
-# 加载 .env
-load_dotenv()
+# ==================== 初始化日志 ====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# 2. 写入 client_secret.json 文件（带 try 保护）
-try:
-    client_secret_json = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_JSON")
-    if client_secret_json:
-        with open("client_secret.json", "w") as f:
-            json.dump(json.loads(client_secret_json), f)
-except Exception as e:
-    print(f"[写入 client_secret.json 失败]：{e}")
-
-# 3. 配置日志（可选）
-logging.basicConfig(level=logging.INFO)
-
-# 4. 初始化 Flask 和后续逻辑
-
-# Flask 初始化
+# ==================== Flask 初始化 ====================
 app = Flask(__name__)
+load_dotenv()
 app.secret_key = os.getenv("FLASK_SECRET", "defaultsecret")
 app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
-# 常量设置
+# ==================== 环境变量 ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URL")  # 直接从 env 读取
+REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", 5000))
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
+
 bot_user_tokens = {}
 
-# Flask 路由 - 授权回调
+# ==================== Telegram 指令 ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("欢迎使用 AI 妃授权系统，输入 /auth 开始授权")
+
+async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user_id = update.effective_user.id
+        session["telegram_user_id"] = user_id
+
+        flow = Flow.from_client_secrets_file(
+            CLIENT_SECRETS_FILE,
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI
+        )
+
+        authorization_url, state = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true",
+            prompt="consent"
+        )
+
+        session["state"] = state
+        keyboard = [[InlineKeyboardButton("点击授权", url=authorization_url)]]
+        markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("请点击按钮完成授权：", reply_markup=markup)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ 授权错误：{e}")
+
+# ==================== Flask OAuth 路由 ====================
+@app.route("/")
+def home():
+    return "✅ Flask 启动成功 - Bot 授权系统在线"
+
 @app.route("/oauth2callback")
 def oauth2callback():
     try:
@@ -50,7 +81,7 @@ def oauth2callback():
         flow = Flow.from_client_secrets_file(
             CLIENT_SECRETS_FILE,
             scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
+            redirect_uri=REDIRECT_URI
         )
         flow.fetch_token(authorization_response=request.url)
 
@@ -63,56 +94,27 @@ def oauth2callback():
                 "refresh_token": credentials.refresh_token,
                 "client_id": credentials.client_id,
                 "client_secret": credentials.client_secret,
-                "scopes": credentials.scopes,
+                "scopes": credentials.scopes
             }
-            return "✅ 授权成功！你可以关闭这个页面了"
-        return "❌ 无法识别用户 ID，授权失败"
+            return "✅ 授权成功，AI记忆系统已记录。"
+        return "❌ 未找到用户 ID"
     except Exception as e:
         return f"❌ 授权失败：{e}"
 
-# Telegram /start 指令
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("欢迎使用 AI妃 OAuth 系统，发送 /auth 开始授权流程。")
+# ==================== 启动逻辑 ====================
+def run_bot():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("auth", auth))
 
-# Telegram /auth 指令
-async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = update.effective_user.id
-        session["telegram_user_id"] = user_id
-
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-        )
-
-        authorization_url, state = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent"
-        )
-
-        session["state"] = state
-        keyboard = [[InlineKeyboardButton("点击此处授权", url=authorization_url)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text("请点击下方按钮完成授权：", reply_markup=reply_markup)
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ 授权流程异常：{e}")
-
-# Telegram Bot 启动逻辑（独立线程）
-def start_telegram_bot():
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("auth", auth))
-    app_bot.run_webhook(
+    application.run_webhook(
         listen="0.0.0.0",
-        port=int(os.getenv("PORT", 8080)),
-        url_path="/webhook",
-        webhook_url=f"{REDIRECT_URI}".replace("/oauth2callback", "/webhook")
+        port=PORT,
+        webhook_url=WEBHOOK_URL,
+        secret_token=WEBHOOK_SECRET,
+        drop_pending_updates=True
     )
 
-# 启动 Flask + Telegram Bot
 if __name__ == "__main__":
-    Thread(target=start_telegram_bot).start()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    Thread(target=run_bot).start()
+    app.run(host="0.0.0.0", port=PORT)
