@@ -9,8 +9,22 @@ from dotenv import load_dotenv
 from threading import Thread
 
 # 加载环境变量
+# 加载 .env
 load_dotenv()
+
+# 2. 写入 client_secret.json 文件（带 try 保护）
+try:
+    client_secret_json = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_JSON")
+    if client_secret_json:
+        with open("client_secret.json", "w") as f:
+            json.dump(json.loads(client_secret_json), f)
+except Exception as e:
+    print(f"[写入 client_secret.json 失败]：{e}")
+
+# 3. 配置日志（可选）
 logging.basicConfig(level=logging.INFO)
+
+# 4. 初始化 Flask 和后续逻辑
 
 # Flask 初始化
 app = Flask(__name__)
