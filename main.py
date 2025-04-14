@@ -1,120 +1,61 @@
 import os
-import json
-import logging
-from threading import Thread
-from flask import Flask, request, session
+from flask import Flask, request
 from flask_session import Session
-from google_auth_oauthlib.flow import Flow
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import Update
+from threading import Thread
+from dotenv import load_dotenv
 from datetime import datetime
 import pytz
-from dotenv import load_dotenv
 
-# ==================== 初始化日志 ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# ==================== Flask 初始化 ====================
-app = Flask(__name__)
 load_dotenv()
-app.secret_key = os.getenv("FLASK_SECRET", "defaultsecret")
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", 5000))
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+FLASK_SECRET = os.getenv("FLASK_SECRET", "default_secret")
+
+app = Flask(__name__)
+app.secret_key = FLASK_SECRET
 app.config["SESSION_TYPE"] = "filesystem"
 Session(app)
 
-# ==================== 环境变量 ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CLIENT_SECRETS_FILE = "client_secret.json"
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URL")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", 5000))
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret")
-
-bot_user_tokens = {}
-
-# ==================== Telegram 指令 ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("欢迎使用 AI 妃授权系统，输入 /auth 开始授权")
-
-async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = update.effective_user.id
-        session["telegram_user_id"] = user_id
-
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-
-        authorization_url, state = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent"
-        )
-
-        session["state"] = state
-        keyboard = [[InlineKeyboardButton("点击授权", url=authorization_url)]]
-        markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("请点击按钮完成授权：", reply_markup=markup)
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ 授权错误：{e}")
-
-# ==================== Flask OAuth 路由 ====================
 @app.route("/")
 def home():
-    return "✅ Flask 启动成功 - Bot 授权系统在线"
+    return "✅ AI 妃记忆系统正在运行"
 
 @app.route("/oauth2callback")
 def oauth2callback():
-    try:
-        state = request.args.get("state")
-        if state != session.get("state"):
-            return "❌ 状态不一致，可能是 CSRF 攻击"
+    return "✅ 授权成功，你现在可以回到 Telegram 对话继续使用。"
 
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRETS_FILE,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
-        )
-        flow.fetch_token(authorization_response=request.url)
+@app.route("/health")
+def health():
+    return {"status": "ok"}
 
-        credentials = flow.credentials
-        user_id = session.get("telegram_user_id")
+# Telegram 指令
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("欢迎使用 AI 妃，输入 /auth 开始授权流程")
 
-        if user_id:
-            bot_user_tokens[user_id] = {
-                "token": credentials.token,
-                "refresh_token": credentials.refresh_token,
-                "client_id": credentials.client_id,
-                "client_secret": credentials.client_secret,
-                "scopes": credentials.scopes
-            }
-            return "✅ 授权成功，AI记忆系统已记录。"
-        return "❌ 未找到用户 ID"
-    except Exception as e:
-        return f"❌ 授权失败：{e}"
+async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚀 请点击以下链接开始授权流程：https://example.com/oauth")
 
-# ==================== 启动逻辑 ====================
+# Bot 启动函数
 def run_bot():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("auth", auth))
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("auth", auth))
 
-    application.run_webhook(
+    app_bot.run_webhook(
         listen="0.0.0.0",
         port=PORT,
+        url_path="/webhook",
         webhook_url=WEBHOOK_URL,
         secret_token=WEBHOOK_SECRET,
         drop_pending_updates=True
     )
 
+# 启动入口
 if __name__ == "__main__":
-    Thread(target=run_bot).start()
+    Thread(target=run_bot, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
