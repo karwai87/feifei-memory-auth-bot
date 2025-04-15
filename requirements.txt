@@ -1,7 +1,0 @@
-python-telegram-bot==20.6
-Flask==2.3.2
-Flask-Session
-google-auth-oauthlib==1.0.0
-google-api-python-client
-google-auth-httplib2
-python-dotenv
