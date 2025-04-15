@@ -5,8 +5,8 @@ from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from google_auth_oauthlib.flow import Flow
-
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # ========== 环境变量 ==========
@@ -14,7 +14,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OAUTH_REDIRECT_URL = os.getenv("OAUTH_REDIRECT_URL")
 PORT = int(os.getenv("PORT", 8080))
 CLIENT_SECRET_FILE = "client_secret.json"
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]  # 替换为您需要的 Google API 权限
 
 # ========== 日志 ==========
 logging.basicConfig(level=logging.INFO)
@@ -45,14 +45,19 @@ def oauth2callback():
         credentials = flow.credentials
 
         logger.info(f"✅ 用户 {user_id} 完成授权")
-        return f"<h2>✅ 授权成功！</h2><p>Telegram 用户 ID：{user_id}</p><p>你现在可以回到 Telegram 使用 AI 妃功能。</p>"
+        return f"""
+            <h2>✅ 授权成功！</h2>
+            <p>Telegram 用户 ID：{user_id}</p>
+            <p>你现在可以回到 Telegram 使用 AI 妃功能。</p>
+        """
     except Exception as e:
         logger.error(f"❌ 授权失败: {e}")
         return f"<h2>❌ 授权失败</h2><p>{e}</p>"
 
 # ========== Telegram Bot ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("欢迎使用 AI 妃系统，输入 /auth 开始授权。")
+    user = update.effective_user
+    await update.message.reply_text(f"你好 {user.first_name}！发送 /auth 开始授权。")
 
 async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -78,13 +83,15 @@ async def main():
     app_telegram.add_handler(CommandHandler("start", start))
     app_telegram.add_handler(CommandHandler("auth", auth))
 
-    # 启动 Flask（异步运行）
-    from threading import Thread
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=PORT))
-    flask_thread.start()
+    # 启动 Flask (在同一个 asyncio 事件循环中)
+    async def run_flask():
+        from hypercorn.asyncio import serve
+        from hypercorn.config import Config
+        config = Config()
+        config.bind = [f"0.0.0.0:{PORT}"]
+        await serve(app, config)
 
-    # 启动 Telegram Polling
-    await app_telegram.run_polling()
+    await asyncio.gather(app_telegram.run_polling(), run_flask())
 
 if __name__ == "__main__":
     asyncio.run(main())
