@@ -6,6 +6,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from google_auth_oauthlib.flow import Flow
 from dotenv import load_dotenv
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
 
 load_dotenv()
 
@@ -83,15 +85,18 @@ async def main():
     app_telegram.add_handler(CommandHandler("start", start))
     app_telegram.add_handler(CommandHandler("auth", auth))
 
-    # 启动 Flask (在同一个 asyncio 事件循环中)
     async def run_flask():
-        from hypercorn.asyncio import serve
-        from hypercorn.config import Config
         config = Config()
         config.bind = [f"0.0.0.0:{PORT}"]
         await serve(app, config)
 
-    await asyncio.gather(app_telegram.run_polling(), run_flask())
+    # 使用 asyncio.gather 并发运行 Telegram Bot 和 Flask
+    try:
+        await asyncio.gather(app_telegram.run_polling(), run_flask())
+    except Exception as e:
+        logger.error(f"主程序发生异常: {e}")
+    finally:
+        await app_telegram.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
