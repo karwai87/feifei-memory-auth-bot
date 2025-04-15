@@ -1,94 +1,120 @@
-# main.py
 import os
 import logging
-from flask import Flask, request, session
+from flask import Flask, request, session, redirect, url_for
 from flask_session import Session
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from google_auth_oauthlib.flow import Flow
 from dotenv import load_dotenv
 
-# ==== 初始化 ====
+# 加载环境变量
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 FLASK_SECRET = os.getenv("FLASK_SECRET", "your_flask_secret")
 PORT = int(os.getenv("PORT", 8080))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://xxx.up.railway.app/webhook
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "telegramsecret")
-REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # 例如: https://your-app-name.railway.app/webhook
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "telegram_webhook_secret")
+OAUTH_CLIENT_SECRET_FILE = 'client_secret.json'  # 确保此文件在项目根目录下
+OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/spreadsheets"]
+OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI")  # 例如: https://your-app-name.railway.app/oauth2callback
 
-app = Flask(__name__)
-app.secret_key = FLASK_SECRET
-app.config['SESSION_TYPE'] = 'filesystem'
-Session(app)
-
-logging.basicConfig(level=logging.INFO)
+# 配置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ==== Telegram 逻辑 ====
+# 初始化 Flask 应用
+app = Flask(__name__)
+app.secret_key = FLASK_SECRET
+app.config['SESSION_TYPE'] = 'filesystem'  # 建议生产环境使用更持久化的存储如 Redis
+Session(app)
+
+# 初始化 Telegram Bot Application
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+# ==== Telegram Bot Handlers ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("欢迎使用 AI 妃系统，输入 /auth 开始授权")
+    await update.message.reply_text("欢迎使用 AI 妃系统！请使用 /auth 授权 Google 服务。")
 
 async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session["telegram_user_id"] = user_id
-
     flow = Flow.from_client_secrets_file(
-        'client_secret.json',
-        scopes=["https://www.googleapis.com/auth/drive.file"],
-        redirect_uri=REDIRECT_URI
+        OAUTH_CLIENT_SECRET_FILE,
+        scopes=OAUTH_SCOPES,
+        redirect_uri=OAUTH_REDIRECT_URI
     )
-    auth_url, state = flow.authorization_url(
+    authorization_url, state = flow.authorization_url(
         access_type='offline',
-        include_granted_scopes='true',
-        prompt='consent'
+        include_granted_scopes='true'
     )
-    session["state"] = state
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("点我授权 Google", url=auth_url)]])
-    await update.message.reply_text("点击下方按钮开始授权：", reply_markup=markup)
+    session['state'] = state
+    session['telegram_user_id'] = update.effective_user.id
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("授权 Google", url=authorization_url)]])
+    await update.message.reply_text("请点击以下链接授权 Google 服务：", reply_markup=markup)
 
-# ==== Flask OAuth 回调 ====
+# 将 Handlers 添加到 Telegram Bot Application
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("auth", auth))
+
+# ==== Flask Webhook Endpoint for Telegram ====
+@app.route("/webhook", methods=["POST"])
+async def webhook():
+    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') == WEBHOOK_SECRET:
+        update = Update.de_json(request.get_json(), application.bot)
+        await application.process_update(update)
+        return "OK", 200
+    else:
+        logger.warning("Received invalid webhook secret token")
+        return "Unauthorized", 401
+
+# ==== Flask Google OAuth Callback ====
 @app.route("/oauth2callback")
 def oauth2callback():
+    if 'error' in request.args:
+        return f"授权失败: {request.args['error']}"
+
     try:
         flow = Flow.from_client_secrets_file(
-            'client_secret.json',
-            scopes=["https://www.googleapis.com/auth/drive.file"],
-            redirect_uri=REDIRECT_URI
+            OAUTH_CLIENT_SECRET_FILE,
+            scopes=OAUTH_SCOPES,
+            state=session['state'],
+            redirect_uri=OAUTH_REDIRECT_URI
         )
         flow.fetch_token(authorization_response=request.url)
         credentials = flow.credentials
-        user_id = session.get("telegram_user_id")
-        if user_id:
-            logger.info(f"✅ 用户 {user_id} 成功授权")
-            return f"✅ 授权成功！Access Token 前10位: {credentials.token[:10]}..."
+        telegram_user_id = session.get('telegram_user_id')
+
+        if telegram_user_id:
+            logger.info(f"用户 {telegram_user_id} 成功授权 Google Drive/Sheets。")
+            # 在这里你可以将 credentials 保存到你的用户数据中，例如数据库
+            session['google_credentials'] = {
+                'token': credentials.token,
+                'refresh_token': credentials.refresh_token,
+                'token_uri': credentials.token_uri,
+                'client_id': credentials.client_id,
+                'client_secret': credentials.client_secret,
+                'scopes': credentials.scopes
+            }
+            return f"授权成功！你的 Telegram 用户 ID 是 {telegram_user_id}。"
         else:
-            return "⚠️ 无法识别用户 ID"
+            return "授权成功，但无法关联 Telegram 用户。"
+
     except Exception as e:
-        return f"❌ 授权失败：{e}"
+        logger.error(f"OAuth 2.0 回调处理失败: {e}")
+        return f"OAuth 2.0 回调处理失败: {e}"
 
+# ==== Health Check Endpoint for Railway ====
 @app.route("/")
-def index():
-    return "✅ AI妃系统运行中"
+def health_check():
+    return "AI 妃系统运行正常", 200
 
-@app.route("/health")
-def health():
-    return {"status": "healthy"}
-
-# ==== 启动 Bot（Webhook 模式）====
-def start_bot():
-    app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_telegram.add_handler(CommandHandler("start", start))
-    app_telegram.add_handler(CommandHandler("auth", auth))
-
-    app_telegram.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=WEBHOOK_URL,
-        secret_token=WEBHOOK_SECRET,
-        drop_pending_updates=True
-    )
-
-# ==== 主程序入口 ====
 if __name__ == "__main__":
-    start_bot()  # 不再放入 Thread，主线程运行 Telegram
+    # 在 Railway 上部署时，需要设置 Webhook
+    if WEBHOOK_URL:
+        application.run_webhook(listen="0.0.0.0",
+                                port=PORT,
+                                webhook_url=WEBHOOK_URL,
+                                secret_token=WEBHOOK_SECRET)
+        # Flask 仍然需要运行，以便处理 OAuth 回调和健康检查
+        app.run(host="0.0.0.0", port=PORT, use_reloader=False)
+    else:
+        logger.warning("WEBHOOK_URL 未设置，将使用 polling 模式 (仅适用于本地开发)")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
