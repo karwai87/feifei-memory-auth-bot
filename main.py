@@ -1,89 +1,91 @@
 import os
-import threading
 import logging
-from flask import Flask, request, redirect
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from google_auth_oauthlib.flow import Flow
+import asyncio
+from flask import Flask, redirect, request, session
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# 环境变量
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URL")
-CLIENT_SECRET_FILE = "client_secret.json"
+from oauthlib.oauth2 import WebApplicationClient
+import requests
+import json
 
-# 日志配置
+# --- 环境变量读取 ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+FLASK_SECRET = os.environ.get("FLASK_SECRET", "dev_secret")
+OAUTH_REDIRECT_URL = os.environ.get("OAUTH_REDIRECT_URL")
+GOOGLE_CLIENT_SECRET_FILE = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET_FILE", "client_secret.json")
+PORT = int(os.environ.get("PORT", 8080))
+
+# --- 日志设置 ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask 初始化
-app_flask = Flask(__name__)
+# --- Flask App 初始化 ---
+app = Flask(__name__)
+app.secret_key = FLASK_SECRET
 
-# OAuth 授权状态管理
-user_oauth_map = {}
+# --- 读取 Google OAuth 配置 ---
+with open(GOOGLE_CLIENT_SECRET_FILE) as f:
+    google_creds = json.load(f)["web"]
 
-@app_flask.route("/oauth2callback")
-def oauth2callback():
-    try:
-        state = request.args.get('state')
-        telegram_user_id = user_oauth_map.get(state)
+GOOGLE_CLIENT_ID = google_creds["client_id"]
+GOOGLE_CLIENT_SECRET = google_creds["client_secret"]
+GOOGLE_AUTH_URI = google_creds["auth_uri"]
+GOOGLE_TOKEN_URI = google_creds["token_uri"]
 
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRET_FILE,
-            scopes=['https://www.googleapis.com/auth/drive.metadata.readonly'],
-            state=state,
-            redirect_uri=OAUTH_REDIRECT_URI
-        )
-        flow.fetch_token(authorization_response=request.url)
-        credentials = flow.credentials
+client = WebApplicationClient(GOOGLE_CLIENT_ID)
 
-        if telegram_user_id:
-            logger.info(f"✅ 用户 {telegram_user_id} 授权成功")
-            return f"✅ 授权成功！Telegram 用户 ID：{telegram_user_id}，你现在可以返回 Telegram 使用 bot 功能。"
-        else:
-            return "⚠️ 授权成功，但找不到 Telegram 用户 ID"
 
-    except Exception as e:
-        logger.error(f"❌ OAuth 回调失败: {e}")
-        return f"❌ 授权失败: {e}"
-
-# Telegram 处理函数
+# --- Telegram Bot 指令处理 ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    logger.info(f"收到 /start 指令，来自用户 {user.id}")
+    logger.info(f"收到 /start 指令，来自用户 {update.effective_user.id}")
     await update.message.reply_text("欢迎使用 AI 妃系统！请输入 /auth 授权 Google")
 
 async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        flow = Flow.from_client_secrets_file(
-            CLIENT_SECRET_FILE,
-            scopes=['https://www.googleapis.com/auth/drive.metadata.readonly'],
-            redirect_uri=OAUTH_REDIRECT_URI
-        )
-        authorization_url, state = flow.authorization_url(
-            access_type='offline',
-            include_granted_scopes='true'
-        )
-        user_oauth_map[state] = update.effective_user.id
-        keyboard = [[InlineKeyboardButton("授权 Google", url=authorization_url)]]
-        await update.message.reply_text("请点击下方链接授权 Google：", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        logger.error(f"❌ 生成授权链接失败: {e}")
-        await update.message.reply_text(f"❌ 授权失败：{e}")
+    authorization_url = client.prepare_request_uri(
+        GOOGLE_AUTH_URI,
+        redirect_uri=OAUTH_REDIRECT_URL,
+        scope=["https://www.googleapis.com/auth/userinfo.email"],
+    )
+    await update.message.reply_text(f"请点击授权：{authorization_url}")
 
-# 启动 Telegram bot
-def run_telegram():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("auth", auth))
-    logger.info("Telegram Bot 已启动")
-    app.run_polling()
 
-# 启动 Flask
-def run_flask():
-    logger.info("Flask Web 服务运行中，监听端口 8080")
-    app_flask.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+# --- Flask 路由处理 Google OAuth 回调 ---
+@app.route("/oauth2callback")
+def oauth2callback():
+    code = request.args.get("code")
+    if not code:
+        return "缺少 code 参数", 400
 
-# 同时运行两个服务
+    token_url, headers, body = client.prepare_token_request(
+        GOOGLE_TOKEN_URI,
+        authorization_response=request.url,
+        redirect_url=OAUTH_REDIRECT_URL,
+        code=code,
+    )
+    token_response = requests.post(token_url, headers=headers, data=body, auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET))
+    client.parse_request_body_response(json.dumps(token_response.json()))
+    return "授权成功 ✅ 请返回 Telegram"
+
+
+# --- Telegram Bot 初始化函数 ---
+async def run_bot():
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("auth", auth))
+    logger.info("🤖 Telegram Bot 已启动")
+    await application.run_polling()
+
+
+# --- 启动入口 ---
+async def main():
+    loop = asyncio.get_event_loop()
+
+    # 同时运行 Flask + Telegram Bot
+    bot_task = asyncio.create_task(run_bot())
+    flask_task = asyncio.to_thread(app.run, host="0.0.0.0", port=PORT)
+
+    await asyncio.gather(bot_task, flask_task)
+
 if __name__ == "__main__":
-    threading.Thread(target=run_telegram).start()
-    threading.Thread(target=run_flask).start()
+    asyncio.run(main())
